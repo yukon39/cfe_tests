@@ -1,0 +1,7 @@
+{
+    "xunit": {
+        "testsPath": "ТестированиеТБ",
+        "--config-tests": "true",
+        "--reportsxunit":"ГенераторОтчетаAllureXMLВерсия2{.temp/xunit/allure/result.xml}"
+    }
+}

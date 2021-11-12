@@ -1,0 +1,148 @@
+pipeline {
+
+    agent {
+        label 'add'
+    }
+
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr:'20'))
+    }
+
+    environment {
+        RUNNER_IBCONNECTION = "/F\"${WORKSPACE}/.temp/ib\""
+        RUNNER_V8VERSION = '8.3.20.1549'
+
+        TestsExtensionName = 'Тесты'
+    }
+
+    stages {
+        stage('Подготовка рабочей области') {
+            steps {
+                build_os('init', [])
+            }
+        }
+        stage('Сборка проекта') {
+            steps {
+                build_os('build-cf', [
+                    '--src src/cf'
+                ])
+            }
+        }
+        stage('Сохранение артефактов') {
+            when { 
+                branch 'release';
+            }   
+            steps {
+                archiveArtifacts artifacts: "bin/*", fingerprint: true
+            }
+        }
+        stage('Первый запуск') {
+            steps {
+                vrunner('run', [
+                    '--execute \$runnerRoot/epf/ЗакрытьПредприятие.epf',
+                    '--command ЗапуститьОбновлениеИнформационнойБазы;ЗавершитьРаботуСистемы'   
+                ])
+            }
+        }
+        stage('Загрузка расширения с тестами') {
+            steps {
+                withEnv(["RUNNER_IBCONNECTION="]) {
+                    vrunner('compileexttocfe', [
+                        '--src src/tests',
+                        '--out temp/test.cfe'   
+                    ])
+                }
+
+                vrunner('run', [
+                    '--execute \$runnerRoot/epf/ЗагрузитьРасширениеВРежимеПредприятия.epf',
+                    '--command Путь=.temp/test.cfe;Имя=${TestsExtensionName};ЗавершитьРаботуСистемы'   
+                    ]) 
+            }
+        }   
+        
+        stage('Запуск тестов') {
+            steps {
+                vrunner('xunit', [
+                    '--settings build/vrunnerXUnit.json'
+                    ])    
+            } 
+        } 
+        
+        stage('Формирование отчета Allure') {
+            steps {
+                allure results: [ [ path: '.temp/allure'] ]
+            }
+        } 
+
+        stage('Расчет покрытия кода') {
+            options {
+                timeout(time: 10, unit: 'MINUTES')
+            }
+
+            environment {
+                commandArgs = [
+                    "--step-coverage",
+                    "--extension-name ${ExtensionName}",
+                    "--extension-folder src/cfe"
+                ].join(' ')    
+            }
+
+            steps {
+                oscript('build/test.os', commandArgs)  
+
+                publishCoverage adapters: [
+                        sonarGenericCoverageAdapter(path: '.temp/genericCoverage.xml')
+                    ],
+                    sourceFileResolver: sourceFiles('STORE_LAST_BUILD')   
+            }            
+        }
+
+        stage ('Анализ ветки средствами SonarQube') {
+
+            when {
+                not { changeRequest() }
+            }
+
+            steps {
+                stepSonarScanner installationName: 'FT2',
+                    scannerHome: tool('SB'),
+                    branchName: BRANCH_NAME,
+                    projectSettings: '.temp/sonar-project.properties',
+                    projectVersion: getExtensionVersion('src/cfe/Configuration.xml'),
+                    coverageReportPaths: '.temp/coverage/linesToCover.xml,.temp/coverage/coveredLines.xml',
+                    testExecutionReportPaths: '.temp/genericExecution.xml'
+            }
+        }
+
+        stage ('Анализ MR средствами SonarQube') {
+
+            when {
+                changeRequest()
+            }
+
+            steps {
+                stepSonarScanner installationName: 'FT2',
+                    scannerHome: tool('SB'),
+                    prKey: CHANGE_ID,
+                    prBranch: CHANGE_BRANCH,
+                    prBase: CHANGE_TARGET,
+                    projectSettings: '.temp/sonar-project.properties',
+                    coverageReportPaths: '.temp/coverage/linesToCover.xml,.temp/coverage/coveredLines.xml',
+                    testExecutionReportPaths: '.temp/genericExecution.xml'
+            }
+        }
+
+        stage('SonarQube Quality gate') {
+            options {
+                timeout(time: 120, unit: 'MINUTES')
+            }
+
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+    }
+}
